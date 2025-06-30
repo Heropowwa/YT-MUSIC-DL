@@ -1,0 +1,8 @@
+# Core dependencies
+yt-dlp>=2023.11.16
+mutagen>=1.47.0
+requests>=2.31.0
+
+# Progress and UI
+tqdm>=4.66.1
+rich>=13.7.0
