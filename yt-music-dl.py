@@ -45,7 +45,7 @@ class DownloadProgressHook:
         elif d['status'] == 'finished' and self.pbar:
             self.pbar.close()
             console.print("[green]Download finished, converting to MP3...[/green]")
-
+            
 def download_song(url: str, output_folder: str, use_order_prefix=False, index=0):
     prefix = f"{index:02d} - " if use_order_prefix else ""
     ydl_opts = {
@@ -62,6 +62,7 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
             'preferredquality': '320',
         }],
     }
+
     hook = DownloadProgressHook()
     ydl_opts['progress_hooks'].append(hook.hook)
 
@@ -72,9 +73,17 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
     info = retry_request(_dl, max_retries=3)
     if info is None:
         raise RuntimeError("Download failed or info missing.")
+
     title = info.get('title', 'Unknown_Title')
     filename = f"{prefix}{title}.mp3"
-    return os.path.join(output_folder, filename), info
+    full_path = os.path.join(output_folder, filename)
+
+    # ✅ Verify that the file was created and is not empty
+    if not os.path.isfile(full_path) or os.path.getsize(full_path) == 0:
+        raise RuntimeError("Downloaded file is missing or empty.")
+
+    return full_path, info
+            
 
 def get_duration_seconds(mp3_path: str) -> int:
     return int(MP3(mp3_path).info.length)
@@ -154,74 +163,74 @@ def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
 def process_song(url: str, folder: str, index: int, total: int,
                  include_meta: bool, include_cover: bool, include_lyrics: bool,
                  keep_order: bool, album_name: str = None):
-    console.print(f"\n[bold blue][{index}/{total}] Downloading:[/bold blue] {url}")
-    try:
-        mp3_path, info = download_song(url, folder, use_order_prefix=keep_order, index=index)
-    except Exception as e:
-        console.print(f"[red]Download failed: {e}[/red]")
-        return
-
-    title = info.get("title", "Unknown Title")
-    artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-    album_raw = info.get("album") or ""
-
-    try:
-        duration = get_duration_seconds(mp3_path)
-    except Exception as e:
-        console.print(f"[yellow]Couldn't get duration: {e}[/yellow]")
-        duration = 0
-
-    plain_lyrics = None
-    if include_lyrics:
-        synced, plain_lyrics = fetch_lyrics(artist, title, album_raw, duration)
-        if synced:
-            save_lrc(synced, mp3_path)
-        else:
-            console.print("[yellow]No synced lyrics found[/yellow]")
-
-    album = album_name or album_raw or "Unknown Album"
-    console.print(f"[bold]{title}[/bold] • [italic]{artist}[/italic] • {album}")
-
-    if include_meta or include_cover or (include_lyrics and plain_lyrics):
+    max_attempts = 3
+    for attempt in range(1, max_attempts + 1):
+        console.print(f"\n[bold blue][{index}/{total}] Attempt {attempt} - Downloading:[/bold blue] {url}")
         try:
-            insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
-                            track_number=index if keep_order else None,
-                            album_override=album)
-        except Exception as e:
-            console.print(f"[red]Metadata embedding failed: {e}[/red]")
+            mp3_path, info = download_song(url, folder, use_order_prefix=keep_order, index=index)
+            title = info.get("title", "Unknown Title")
+            artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
+            album_raw = info.get("album") or ""
 
+            try:
+                duration = get_duration_seconds(mp3_path)
+            except Exception as e:
+                console.print(f"[yellow]Couldn't get duration: {e}[/yellow]")
+                duration = 0
 
-    if include_meta or include_cover or (include_lyrics and plain_lyrics):
-        try:
-            insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
-                            track_number=index if keep_order else None,
-                            album_override=album_name)
+            plain_lyrics = None
+            if include_lyrics:
+                synced, plain_lyrics = fetch_lyrics(artist, title, album_raw, duration)
+                if synced:
+                    save_lrc(synced, mp3_path)
+                else:
+                    console.print("[yellow]No synced lyrics found[/yellow]")
+
+            album = album_name or album_raw or "Unknown Album"
+            console.print(f"[bold]{title}[/bold] • [italic]{artist}[/italic] • {album}")
+
+            if include_meta or include_cover or (include_lyrics and plain_lyrics):
+                try:
+                    insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
+                                    track_number=index if keep_order else None,
+                                    album_override=album)
+                except Exception as e:
+                    console.print(f"[red]Metadata embedding failed: {e}[/red]")
+            return
         except Exception as e:
-            console.print(f"[red]Metadata embedding failed: {e}[/red]")
+            console.print(f"[red]Failed to process song: {e}[/red]")
+            if attempt == max_attempts:
+                console.print(f"[bold red]Giving up after {max_attempts} attempts[/bold red]")
+            else:
+                wait = 2 ** attempt + random.uniform(0, 1)
+                console.print(f"[yellow]Retrying in {wait:.1f}s...[/yellow]")
+                time.sleep(wait)
 
 def process_url(url: str, output_dir: str, include_meta: bool,
                 include_cover: bool, include_lyrics: bool, keep_order: bool):
-    try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True, 'skip_download': True}) as ydl:
-            info = retry_request(lambda: ydl.extract_info(url, download=False), max_retries=3)
+    with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True, 'skip_download': True}) as ydl:
+        info = retry_request(lambda: ydl.extract_info(url, download=False), max_retries=3)
 
-        if isinstance(info, dict) and info.get('entries'):
-            playlist_title = info.get('title', f'Playlist_{int(time.time())}')
-            entries = [e for e in info['entries'] if e]
-            folder = create_output_folder(output_dir, playlist_title)
-            console.print(f"[cyan]Folder:[/cyan] {folder}")
-            console.print(f"[magenta]{playlist_title}[/magenta] - {len(entries)} tracks")
+    if isinstance(info, dict) and info.get('entries'):
+        playlist_title = info.get('title', f'Playlist_{int(time.time())}')
+        entries = [e for e in info['entries'] if e]
+        folder = create_output_folder(output_dir, playlist_title)
+        console.print(f"[cyan]Folder:[/cyan] {folder}")
+        console.print(f"[magenta]{playlist_title}[/magenta] - {len(entries)} tracks")
 
-            for i, entry in enumerate(entries, 1):
-                video_url = f"https://www.youtube.com/watch?v={entry['id']}"
+        for i, entry in enumerate(entries, 1):
+            try:
+                video_id = entry.get('id')
+                if not video_id:
+                    raise ValueError("Missing video ID in playlist entry")
+                video_url = f"https://www.youtube.com/watch?v={video_id}"
                 process_song(video_url, folder, i, len(entries), include_meta, include_cover, include_lyrics, keep_order, album_name=playlist_title)
-        else:
-            single_title = info.get('title', 'Single')
-            folder = create_output_folder(output_dir, single_title)
-            process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False, album_name=single_title)
-
-    except Exception as e:
-        console.print(f"[red]Failed to process URL: {e}[/red]")
+            except Exception as e:
+                console.print(f"[red]Skipping track {i}: {e}[/red]")
+    else:
+        single_title = info.get('title', 'Single')
+        folder = create_output_folder(output_dir, single_title)
+        process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False, album_name=single_title)
 
 def read_urls_from_file(file_path: str):
     with open(file_path, 'r') as f:
@@ -269,10 +278,18 @@ def main():
 
     for i, url in enumerate(urls, 1):
         console.rule(f"[bold green]Processing URL {i}/{len(urls)}[/bold green]")
-        try:
-            process_url(url, output_dir, include_meta, include_cover, include_lyrics, keep_order)
-        except Exception as e:
-            console.print(f"[red]Error processing URL: {e}[/red]")
+        for attempt in range(1, 4):
+            try:
+                process_url(url, output_dir, include_meta, include_cover, include_lyrics, keep_order)
+                break
+            except Exception as e:
+                console.print(f"[red]Failed (attempt {attempt}): {e}[/red]")
+                if attempt == 3:
+                    console.print(f"[bold red]Skipping URL after 3 failures[/bold red]")
+                else:
+                    wait = 2 ** attempt
+                    console.print(f"[yellow]Retrying in {wait}s...[/yellow]")
+                    time.sleep(wait)
 
     console.print(Panel.fit("[bold green]All downloads completed![/bold green]", border_style="green"))
 
