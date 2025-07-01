@@ -108,7 +108,8 @@ def save_lrc(lyrics: str, mp3_path: str):
 
 def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
                     include_meta: bool, include_cover: bool,
-                    track_number: int | None = None):
+                    track_number: int | None = None,
+                    album_override: str | None = None):
     try:
         audio = ID3(mp3_path)
     except error.ID3NoHeaderError:
@@ -117,7 +118,8 @@ def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
     if include_meta:
         audio["TIT2"] = TIT2(encoding=3, text=info.get("title", "Unknown Title"))
         audio["TPE1"] = TPE1(encoding=3, text=info.get("artist") or info.get("uploader") or "Unknown Artist")
-        audio["TALB"] = TALB(encoding=3, text=info.get("album") or "Unknown Album")
+        album = album_override or info.get("album") or "Unknown Album"
+        audio["TALB"] = TALB(encoding=3, text=album)
 
     if track_number is not None:
         try:
@@ -151,7 +153,7 @@ def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
 
 def process_song(url: str, folder: str, index: int, total: int,
                  include_meta: bool, include_cover: bool, include_lyrics: bool,
-                 keep_order: bool):
+                 keep_order: bool, album_name: str = None):
     console.print(f"\n[bold blue][{index}/{total}] Downloading:[/bold blue] {url}")
     try:
         mp3_path, info = download_song(url, folder, use_order_prefix=keep_order, index=index)
@@ -161,8 +163,7 @@ def process_song(url: str, folder: str, index: int, total: int,
 
     title = info.get("title", "Unknown Title")
     artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-    album = info.get("album") or "Unknown Album"
-    console.print(f"[bold]{title}[/bold] • [italic]{artist}[/italic] • {album}")
+    album_raw = info.get("album") or ""
 
     try:
         duration = get_duration_seconds(mp3_path)
@@ -172,16 +173,29 @@ def process_song(url: str, folder: str, index: int, total: int,
 
     plain_lyrics = None
     if include_lyrics:
-        synced, plain_lyrics = fetch_lyrics(artist, title, album, duration)
+        synced, plain_lyrics = fetch_lyrics(artist, title, album_raw, duration)
         if synced:
             save_lrc(synced, mp3_path)
         else:
             console.print("[yellow]No synced lyrics found[/yellow]")
 
+    album = album_name or album_raw or "Unknown Album"
+    console.print(f"[bold]{title}[/bold] • [italic]{artist}[/italic] • {album}")
+
     if include_meta or include_cover or (include_lyrics and plain_lyrics):
         try:
             insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
-                            track_number=index if keep_order else None)
+                            track_number=index if keep_order else None,
+                            album_override=album)
+        except Exception as e:
+            console.print(f"[red]Metadata embedding failed: {e}[/red]")
+
+
+    if include_meta or include_cover or (include_lyrics and plain_lyrics):
+        try:
+            insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
+                            track_number=index if keep_order else None,
+                            album_override=album_name)
         except Exception as e:
             console.print(f"[red]Metadata embedding failed: {e}[/red]")
 
@@ -200,11 +214,11 @@ def process_url(url: str, output_dir: str, include_meta: bool,
 
             for i, entry in enumerate(entries, 1):
                 video_url = f"https://www.youtube.com/watch?v={entry['id']}"
-                process_song(video_url, folder, i, len(entries), include_meta, include_cover, include_lyrics, keep_order)
+                process_song(video_url, folder, i, len(entries), include_meta, include_cover, include_lyrics, keep_order, album_name=playlist_title)
         else:
             single_title = info.get('title', 'Single')
             folder = create_output_folder(output_dir, single_title)
-            process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False)
+            process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False, album_name=single_title)
 
     except Exception as e:
         console.print(f"[red]Failed to process URL: {e}[/red]")
