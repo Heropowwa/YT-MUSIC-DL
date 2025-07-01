@@ -1,102 +1,94 @@
-# 🎵 YT-Music-DL
+---
 
-[![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-![GitHub last commit](https://img.shields.io/github/last-commit/yourusername/YT-Music-DL)
+## 🎵 YouTube Music Downloader (MP3 with Metadata + Lyrics)
 
-A feature-rich YouTube music downloader that converts videos to high-quality MP3s with complete metadata, cover art, and synchronized lyrics.
+A terminal-based Python tool to **download YouTube songs or playlists as high-quality MP3s**, with optional **metadata, cover art, and synced lyrics**.
 
-![Demo Screenshot](https://i.imgur.com/example.png) *(example screenshot placeholder)*
+---
 
-## ✨ Features
+### ✅ Features
 
-- **High Quality Audio**: 320kbps MP3 conversion
-- **Smart Metadata**:
-  - Automatic title, artist, and album tagging
-  - Cover art embedding from YouTube thumbnails
-- **Lyrics Support**:
-  - Fetches time-synced lyrics (LRC format)
-  - Embeds plain lyrics in MP3 files
-- **Batch Processing**:
-  - Download entire playlists with one command
-  - Process multiple URLs or text files
-- **Beautiful Interface**:
-  - Rich terminal formatting
-  - Progress bars for downloads
-  - Color-coded status messages
+* Download individual videos or full playlists
+* Convert to 320kbps MP3 using `yt-dlp` + `ffmpeg`
+* Embed metadata (title, artist, album)
+* Embed high-res thumbnail as cover art
+* Auto-fetch synced and unsynced lyrics from LRCLib
+* Save lyrics as `.lrc` alongside MP3
+* Fully interactive CLI (no arguments, just input prompts)
 
-## ⚙️ Installation
+---
 
-1. **Prerequisites**: Python 3.8+
-```bash
-# Verify Python version
-python --version
-```
+### 📦 Requirements
 
-2. **Install dependencies**:
+* Python 3.8+
+* `ffmpeg` installed and in your PATH
+* Install dependencies with:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## 🚀 Usage
+---
 
-### Basic Commands
+### 📥 Usage
+
+Just run the script — it will guide you step-by-step:
+
 ```bash
-# Single video
-python yt_music.py "https://youtube.com/watch?v=..."
-
-# Playlist
-python yt_music.py "https://youtube.com/playlist?list=..."
-
-# Multiple URLs
-python yt_music.py "https://url1" "https://url2" "https://url3"
+python g.py
 ```
 
-### Advanced Options
-```bash
-# Custom output directory
-python yt_music.py -o ~/Music/ "https://url"
+You'll be prompted for:
 
-# Batch processing from file
-python yt_music.py --batch-file=urls.txt
+* A batch file (optional)
+* YouTube links (one or more)
+* Output folder
+* Whether to include metadata
+* Whether to include cover art
+* Whether to fetch lyrics
 
-# Disable features
-python yt_music.py --no-cover --no-lyrics "https://url"
+---
+
+### 📁 Batch File Format
+
+If using a batch file:
+
+* One URL per line
+* Lines starting with `#` are ignored
+
+Example (`urls.txt`):
+
+```
+https://www.youtube.com/watch?v=abc123
+https://www.youtube.com/playlist?list=xyz456
+# This is a comment
 ```
 
-### Batch File Format (urls.txt)
-```text
-# Comments are allowed
-https://youtube.com/playlist?list=PL...
-https://youtube.com/watch?v=...
-# More URLs...
+---
+
+### 🛠 Output
+
+Each song or playlist will be saved in a clean folder structure like:
+
+```
+output_dir/
+└── PlaylistName/
+    ├── Song Title.mp3
+    ├── Song Title.lrc  (if lyrics found)
 ```
 
-## 📂 Output Structure
-```
-Output_Directory/
-├── Playlist_Name/
-│   ├── Song_Title.mp3
-│   ├── Song_Title.lrc (if lyrics found)
-│   └── ...
-└── Single_Tracks/
-    └── Song_Title.mp3
-```
+---
 
-## 🛠️ Configuration
-Customize behavior by modifying these default options in the script:
-- Default download quality
-- Metadata preferences
-- Retry attempts
-- Timeout settings
+### 💡 Notes
 
-## 🤝 Contributing
-Pull requests are welcome! For major changes, please open an issue first.
+* Cover art is extracted from the highest-resolution thumbnail available.
+* Lyrics fetched from [lrclib.net](https://lrclib.net/).
+* Script uses `yt-dlp`, `mutagen`, `requests`, `rich`, and `tqdm`.
 
-1. Fork the project
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some amazing feature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
+---
 
+### 🧾 License
 
+MIT License — free to use, modify, and share.
+
+---
