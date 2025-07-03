@@ -8,7 +8,7 @@ import random
 import requests
 import yt_dlp
 from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, USLT, TIT2, TPE1, TALB, TRCK, error
+from mutagen.id3 import ID3, APIC, USLT, TIT2, TPE1, TPE2, TALB, TRCK, error
 from tqdm import tqdm
 from rich.console import Console
 from rich.panel import Panel
@@ -118,16 +118,23 @@ def save_lrc(lyrics: str, mp3_path: str):
 def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
                     include_meta: bool, include_cover: bool,
                     track_number: int | None = None,
-                    album_override: str | None = None):
+                    album_override: str | None = None,
+                    is_various_artists: bool = False,
+                    album_artist_override: str | None = None):
     try:
         audio = ID3(mp3_path)
     except error.ID3NoHeaderError:
         audio = ID3()
 
     if include_meta:
-        audio["TIT2"] = TIT2(encoding=3, text=info.get("title", "Unknown Title"))
-        audio["TPE1"] = TPE1(encoding=3, text=info.get("artist") or info.get("uploader") or "Unknown Artist")
+        title = info.get("title", "Unknown Title")
+        artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
         album = album_override or info.get("album") or "Unknown Album"
+        album_artist = album_artist_override or artist
+
+        audio["TIT2"] = TIT2(encoding=3, text=title)
+        audio["TPE1"] = TPE1(encoding=3, text=artist)         # Track artist
+        audio["TPE2"] = TPE2(encoding=3, text=album_artist)   # Album artist
         audio["TALB"] = TALB(encoding=3, text=album)
 
     if track_number is not None:
@@ -162,7 +169,8 @@ def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
 
 def process_song(url: str, folder: str, index: int, total: int,
                  include_meta: bool, include_cover: bool, include_lyrics: bool,
-                 keep_order: bool, album_name: str = None):
+                 keep_order: bool, album_name: str = None, is_various_artists: bool = False,
+                 album_artist_override: str = None):
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         console.print(f"\n[bold blue][{index}/{total}] Attempt {attempt} - Downloading:[/bold blue] {url}")
@@ -192,8 +200,9 @@ def process_song(url: str, folder: str, index: int, total: int,
             if include_meta or include_cover or (include_lyrics and plain_lyrics):
                 try:
                     insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
-                                    track_number=index if keep_order else None,
-                                    album_override=album)
+                track_number=index if keep_order else None,
+                album_override=album,
+                album_artist_override=album_artist_override)
                 except Exception as e:
                     console.print(f"[red]Metadata embedding failed: {e}[/red]")
             return
@@ -218,19 +227,35 @@ def process_url(url: str, output_dir: str, include_meta: bool,
         console.print(f"[cyan]Folder:[/cyan] {folder}")
         console.print(f"[magenta]{playlist_title}[/magenta] - {len(entries)} tracks")
 
+        # ✅ Detect if it's a Various Artists album
+        artists = set()
+        for entry in entries:
+            a = entry.get("artist") or entry.get("uploader") or None
+            if a:
+                artists.add(a)
+        is_various_artists = len(artists) > 1
+        album_artist = "Various Artists" if is_various_artists else (list(artists)[0] if artists else "Unknown Artist")
+
         for i, entry in enumerate(entries, 1):
             try:
                 video_id = entry.get('id')
                 if not video_id:
                     raise ValueError("Missing video ID in playlist entry")
                 video_url = f"https://www.youtube.com/watch?v={video_id}"
-                process_song(video_url, folder, i, len(entries), include_meta, include_cover, include_lyrics, keep_order, album_name=playlist_title)
+                process_song(
+                    video_url, folder, i, len(entries),
+                    include_meta, include_cover, include_lyrics, keep_order,
+                    album_name=playlist_title,
+                    is_various_artists=is_various_artists,
+                    album_artist_override=album_artist  # ✅ pass manually
+                )
             except Exception as e:
                 console.print(f"[red]Skipping track {i}: {e}[/red]")
     else:
         single_title = info.get('title', 'Single')
         folder = create_output_folder(output_dir, single_title)
-        process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False, album_name=single_title)
+        process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False,
+                     album_name=single_title, is_various_artists=False, album_artist_override=None)
 
 def read_urls_from_file(file_path: str):
     with open(file_path, 'r') as f:
