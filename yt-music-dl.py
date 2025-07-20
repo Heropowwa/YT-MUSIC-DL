@@ -5,21 +5,32 @@ import os
 import sys
 import time
 import random
+import subprocess
 import requests
+import shutil
+
 import yt_dlp
 from mutagen.mp3 import MP3
 from mutagen.id3 import ID3, APIC, USLT, TIT2, TPE1, TPE2, TALB, TRCK, error
+
 from tqdm import tqdm
 from rich.console import Console
 from rich.panel import Panel
 
 console = Console()
 
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize filename for filesystem safety."""
+    return "".join(c if c.isalnum() or c in " _-()." else "_" for c in name).strip()
+
+
 def create_output_folder(base_path: str, name: str) -> str:
-    safe_name = "".join(c for c in name if c.isalnum() or c in " _-").strip()
+    safe_name = sanitize_filename(name)
     folder_path = os.path.join(base_path, safe_name)
     os.makedirs(folder_path, exist_ok=True)
     return folder_path
+
 
 def retry_request(func, max_retries=3, backoff_factor=2, *args, **kwargs):
     for attempt in range(1, max_retries + 1):
@@ -31,6 +42,7 @@ def retry_request(func, max_retries=3, backoff_factor=2, *args, **kwargs):
             wait = backoff_factor ** attempt + random.uniform(0, 1)
             console.print(f"[yellow]Attempt {attempt} failed: {e}. Retrying in {wait:.1f}s...[/yellow]")
             time.sleep(wait)
+
 
 class DownloadProgressHook:
     def __init__(self):
@@ -44,23 +56,40 @@ class DownloadProgressHook:
             self.pbar.update(d['downloaded_bytes'] - self.pbar.n)
         elif d['status'] == 'finished' and self.pbar:
             self.pbar.close()
-            console.print("[green]Download finished, converting to MP3...[/green]")
-            
+            console.print("[green]Download finished.[/green]")
+
+
+def convert_to_mp3(input_path: str, output_path: str):
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg not found. Please install FFmpeg.")
+
+    command = [
+        'ffmpeg', '-y', '-i', input_path,
+        '-vn', '-acodec', 'libmp3lame', '-b:a', '320k',
+        output_path
+    ]
+
+    result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg conversion failed:\n{result.stderr.decode()}")
+
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) < 1024:
+        raise RuntimeError("Converted MP3 missing or too small.")
+
+    console.print(f"[green]Conversion successful: {os.path.basename(output_path)}[/green]")
+
+
 def download_song(url: str, output_folder: str, use_order_prefix=False, index=0):
     prefix = f"{index:02d} - " if use_order_prefix else ""
+    safe_prefix = sanitize_filename(prefix)
+
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': f'{output_folder}/{prefix}%(title)s.%(ext)s',
-        'noplaylist': False,
+        'outtmpl': f'{output_folder}/{safe_prefix}%(title)s.%(ext)s',
         'quiet': True,
         'no_warnings': True,
-        'ignoreerrors': True,
+        'ignoreerrors': False,
         'progress_hooks': [],
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '320',
-        }],
     }
 
     hook = DownloadProgressHook()
@@ -68,155 +97,86 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
 
     def _dl():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            return ydl.extract_info(url, download=True)
+            result = ydl.extract_info(url, download=True)
+            if result is None:
+                raise RuntimeError("yt_dlp returned None during download.")
+            return result, ydl
 
-    info = retry_request(_dl, max_retries=3)
-    if info is None:
-        raise RuntimeError("Download failed or info missing.")
+    info, ydl_instance = retry_request(_dl, max_retries=3)
+    downloaded_path = ydl_instance.prepare_filename(info)
+
+    if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) < 1024:
+        raise RuntimeError("Downloaded file missing or too small.")
 
     title = info.get('title', 'Unknown_Title')
-    filename = f"{prefix}{title}.mp3"
+    safe_title = sanitize_filename(title)
+    filename = f"{safe_prefix}{safe_title}.mp3"
     full_path = os.path.join(output_folder, filename)
 
-    # ✅ Verify that the file was created and is not empty
-    if not os.path.isfile(full_path) or os.path.getsize(full_path) == 0:
-        raise RuntimeError("Downloaded file is missing or empty.")
+    convert_to_mp3(downloaded_path, full_path)
+
+    try:
+        os.remove(downloaded_path)
+    except Exception:
+        pass
 
     return full_path, info
-            
+
 
 def get_duration_seconds(mp3_path: str) -> int:
     return int(MP3(mp3_path).info.length)
 
-def fetch_lyrics(artist, title, album, duration):
-    def _fetch():
-        q = {
-            "artist_name": artist,
-            "track_name": title,
-            "album_name": album,
-            "duration": str(duration)
-        }
-        res = requests.get("https://lrclib.net/api/search", params=q, timeout=10)
-        res.raise_for_status()
-        return res.json()
 
-    try:
-        data = retry_request(_fetch, max_retries=3)
-        if not data:
-            return None, None
-        return data[0].get("syncedLyrics"), data[0].get("plainLyrics")
-    except Exception as e:
-        console.print(f"[yellow]Failed to fetch lyrics: {e}[/yellow]")
-        return None, None
-
-def save_lrc(lyrics: str, mp3_path: str):
-    lrc_path = os.path.splitext(mp3_path)[0] + ".lrc"
-    with open(lrc_path, "w", encoding="utf-8") as f:
-        f.write(lyrics)
-    console.print(f"[green]Saved LRC:[/green] {os.path.basename(lrc_path)}")
-
-def insert_metadata(mp3_path: str, info: dict, plain_lyrics: str | None,
-                    include_meta: bool, include_cover: bool,
-                    track_number: int | None = None,
-                    album_override: str | None = None,
-                    is_various_artists: bool = False,
-                    album_artist_override: str | None = None):
+def insert_metadata(mp3_path: str, info: dict):
     try:
         audio = ID3(mp3_path)
     except error.ID3NoHeaderError:
         audio = ID3()
 
-    if include_meta:
-        title = info.get("title", "Unknown Title")
-        artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-        album = album_override or info.get("album") or "Unknown Album"
-        album_artist = album_artist_override or artist
+    title = info.get("title", "Unknown Title")
+    artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
+    album = info.get("album") or "Unknown Album"
 
-        audio["TIT2"] = TIT2(encoding=3, text=title)
-        audio["TPE1"] = TPE1(encoding=3, text=artist)         # Track artist
-        audio["TPE2"] = TPE2(encoding=3, text=album_artist)   # Album artist
-        audio["TALB"] = TALB(encoding=3, text=album)
+    audio["TIT2"] = TIT2(encoding=3, text=title)
+    audio["TPE1"] = TPE1(encoding=3, text=artist)
+    audio["TALB"] = TALB(encoding=3, text=album)
 
-    if track_number is not None:
+    thumb_url = info.get("thumbnail")
+    if thumb_url:
         try:
-            audio["TRCK"] = TRCK(encoding=3, text=str(track_number))
+            response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
+            img_data = response.content
+            mime = "image/png" if thumb_url.lower().endswith(".png") else "image/jpeg"
+            audio["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=img_data)
+            console.print("[green]Embedded cover art[/green]")
         except Exception as e:
-            console.print(f"[yellow]Couldn't embed track number: {e}[/yellow]")
-
-    if plain_lyrics:
-        audio["USLT"] = USLT(encoding=3, desc="Lyrics", text=plain_lyrics)
-
-    if include_cover:
-        thumb_url = info.get("thumbnail")
-        if not thumb_url and "thumbnails" in info:
-            thumbs = info["thumbnails"]
-            if thumbs:
-                thumb_url = sorted(thumbs, key=lambda t: t.get("height", 0), reverse=True)[0].get("url")
-        if thumb_url:
-            try:
-                response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
-                img_data = response.content
-                mime = "image/png" if thumb_url.lower().endswith(".png") else "image/jpeg"
-                audio["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=img_data)
-                console.print("[green]Embedded cover art[/green]")
-            except Exception as e:
-                console.print(f"[yellow]Cover art skipped: {e}[/yellow]")
-        else:
-            console.print("[yellow]No cover art URL found[/yellow]")
+            console.print(f"[yellow]Cover art skipped: {e}[/yellow]")
 
     audio.save(mp3_path)
     console.print("[green]Metadata saved[/green]")
 
-def process_song(url: str, folder: str, index: int, total: int,
-                 include_meta: bool, include_cover: bool, include_lyrics: bool,
-                 keep_order: bool, album_name: str = None, is_various_artists: bool = False,
-                 album_artist_override: str = None):
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        console.print(f"\n[bold blue][{index}/{total}] Attempt {attempt} - Downloading:[/bold blue] {url}")
+
+def process_song(url: str, folder: str, index: int, total: int):
+    for attempt in range(1, 4):
+        console.print(f"\n[bold blue][{index}/{total}] Attempt {attempt} - {url}[/bold blue]")
         try:
-            mp3_path, info = download_song(url, folder, use_order_prefix=keep_order, index=index)
-            title = info.get("title", "Unknown Title")
-            artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-            album_raw = info.get("album") or ""
+            mp3_path, info = download_song(url, folder, use_order_prefix=True, index=index)
+            if not os.path.isfile(mp3_path) or os.path.getsize(mp3_path) < 1024:
+                raise RuntimeError("Downloaded MP3 missing or too small after conversion.")
 
-            try:
-                duration = get_duration_seconds(mp3_path)
-            except Exception as e:
-                console.print(f"[yellow]Couldn't get duration: {e}[/yellow]")
-                duration = 0
-
-            plain_lyrics = None
-            if include_lyrics:
-                synced, plain_lyrics = fetch_lyrics(artist, title, album_raw, duration)
-                if synced:
-                    save_lrc(synced, mp3_path)
-                else:
-                    console.print("[yellow]No synced lyrics found[/yellow]")
-
-            album = album_name or album_raw or "Unknown Album"
-            console.print(f"[bold]{title}[/bold] • [italic]{artist}[/italic] • {album}")
-
-            if include_meta or include_cover or (include_lyrics and plain_lyrics):
-                try:
-                    insert_metadata(mp3_path, info, plain_lyrics, include_meta, include_cover,
-                track_number=index if keep_order else None,
-                album_override=album,
-                album_artist_override=album_artist_override)
-                except Exception as e:
-                    console.print(f"[red]Metadata embedding failed: {e}[/red]")
+            insert_metadata(mp3_path, info)
+            console.print(f"[green]Finished:[/green] {os.path.basename(mp3_path)}")
             return
-        except Exception as e:
-            console.print(f"[red]Failed to process song: {e}[/red]")
-            if attempt == max_attempts:
-                console.print(f"[bold red]Giving up after {max_attempts} attempts[/bold red]")
-            else:
-                wait = 2 ** attempt + random.uniform(0, 1)
-                console.print(f"[yellow]Retrying in {wait:.1f}s...[/yellow]")
-                time.sleep(wait)
 
-def process_url(url: str, output_dir: str, include_meta: bool,
-                include_cover: bool, include_lyrics: bool, keep_order: bool):
+        except Exception as e:
+            console.print(f"[red]Failed attempt {attempt}: {e}[/red]")
+            if attempt == 3:
+                console.print(f"[bold red]Giving up after 3 failed attempts[/bold red]")
+            else:
+                time.sleep(2 ** attempt)
+
+
+def process_url(url: str, output_dir: str):
     with yt_dlp.YoutubeDL({'quiet': True, 'extract_flat': True, 'skip_download': True}) as ydl:
         info = retry_request(lambda: ydl.extract_info(url, download=False), max_retries=3)
 
@@ -227,39 +187,23 @@ def process_url(url: str, output_dir: str, include_meta: bool,
         console.print(f"[cyan]Folder:[/cyan] {folder}")
         console.print(f"[magenta]{playlist_title}[/magenta] - {len(entries)} tracks")
 
-        # ✅ Detect if it's a Various Artists album
-        artists = set()
-        for entry in entries:
-            a = entry.get("artist") or entry.get("uploader") or None
-            if a:
-                artists.add(a)
-        is_various_artists = len(artists) > 1
-        album_artist = "Various Artists" if is_various_artists else (list(artists)[0] if artists else "Unknown Artist")
-
         for i, entry in enumerate(entries, 1):
-            try:
-                video_id = entry.get('id')
-                if not video_id:
-                    raise ValueError("Missing video ID in playlist entry")
-                video_url = f"https://www.youtube.com/watch?v={video_id}"
-                process_song(
-                    video_url, folder, i, len(entries),
-                    include_meta, include_cover, include_lyrics, keep_order,
-                    album_name=playlist_title,
-                    is_various_artists=is_various_artists,
-                    album_artist_override=album_artist  # ✅ pass manually
-                )
-            except Exception as e:
-                console.print(f"[red]Skipping track {i}: {e}[/red]")
+            video_id = entry.get('id')
+            if not video_id:
+                console.print(f"[yellow]Skipping entry {i}: Missing video ID[/yellow]")
+                continue
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+            process_song(video_url, folder, i, len(entries))
+
     else:
-        single_title = info.get('title', 'Single')
-        folder = create_output_folder(output_dir, single_title)
-        process_song(url, folder, 1, 1, include_meta, include_cover, include_lyrics, False,
-                     album_name=single_title, is_various_artists=False, album_artist_override=None)
+        folder = create_output_folder(output_dir, "Single_Track")
+        process_song(url, folder, 1, 1)
+
 
 def read_urls_from_file(file_path: str):
     with open(file_path, 'r') as f:
         return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
 
 def main():
     console.print(Panel.fit("[bold cyan]YouTube Music Downloader[/bold cyan]", border_style="cyan"))
@@ -268,11 +212,7 @@ def main():
     use_batch = input("Use a batch file? (y/n): ").strip().lower()
     if use_batch == "y":
         batch_file = input("Enter path to batch file: ").strip()
-        try:
-            urls.extend(read_urls_from_file(batch_file))
-        except Exception as e:
-            console.print(f"[red]Failed to read batch file: {e}[/red]")
-            return
+        urls.extend(read_urls_from_file(batch_file))
 
     while True:
         url = input("Enter YouTube URL (or leave blank to finish): ").strip()
@@ -289,34 +229,15 @@ def main():
         output_dir = os.getcwd()
     os.makedirs(output_dir, exist_ok=True)
 
-    include_meta = input("Embed metadata (title/artist/album)? (y/n): ").strip().lower() != "n"
-    include_cover = input("Embed cover art? (y/n): ").strip().lower() != "n"
-    include_lyrics = input("Fetch lyrics? (y/n): ").strip().lower() != "n"
-    keep_order = input("Keep original playlist order? (y/n): ").strip().lower() == "y"
-
     console.print(f"\nProcessing [bold]{len(urls)}[/bold] URL(s)")
     console.print(f"Output directory: [cyan]{output_dir}[/cyan]")
-    console.print(f"Metadata: {'[green]Yes[/green]' if include_meta else '[yellow]No[/yellow]'}")
-    console.print(f"Cover art: {'[green]Yes[/green]' if include_cover else '[yellow]No[/yellow]'}")
-    console.print(f"Lyrics: {'[green]Yes[/green]' if include_lyrics else '[yellow]No[/yellow]'}")
-    console.print(f"Keep playlist order: {'[green]Yes[/green]' if keep_order else '[yellow]No[/yellow]'}")
 
     for i, url in enumerate(urls, 1):
         console.rule(f"[bold green]Processing URL {i}/{len(urls)}[/bold green]")
-        for attempt in range(1, 4):
-            try:
-                process_url(url, output_dir, include_meta, include_cover, include_lyrics, keep_order)
-                break
-            except Exception as e:
-                console.print(f"[red]Failed (attempt {attempt}): {e}[/red]")
-                if attempt == 3:
-                    console.print(f"[bold red]Skipping URL after 3 failures[/bold red]")
-                else:
-                    wait = 2 ** attempt
-                    console.print(f"[yellow]Retrying in {wait}s...[/yellow]")
-                    time.sleep(wait)
+        process_url(url, output_dir)
 
     console.print(Panel.fit("[bold green]All downloads completed![/bold green]", border_style="green"))
+
 
 if __name__ == "__main__":
     try:
