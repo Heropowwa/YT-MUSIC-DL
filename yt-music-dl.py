@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+import re
 import os
 import sys
 import time
@@ -8,6 +8,9 @@ import random
 import subprocess
 import requests
 import shutil
+import unicodedata
+import string
+from typing import Tuple, Optional
 
 import yt_dlp
 from mutagen.mp3 import MP3
@@ -21,7 +24,7 @@ console = Console()
 
 
 def sanitize_filename(name: str) -> str:
-    """Sanitize filename for filesystem safety."""
+
     return "".join(c if c.isalnum() or c in " _-()." else "_" for c in name).strip()
 
 
@@ -110,7 +113,7 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
 
     title = info.get('title', 'Unknown_Title')
     safe_title = sanitize_filename(title)
-    filename = f"{safe_prefix}{safe_title}.mp3"
+    filename = f"{safe_prefix} {safe_title}.mp3"
     full_path = os.path.join(output_folder, filename)
 
     convert_to_mp3(downloaded_path, full_path)
@@ -122,49 +125,170 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
 
     return full_path, info
 
+def clean_lyrics_string(s):
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = s.replace('"', '').replace("'", '')
+    allowed = string.ascii_letters + string.digits + ' -_()[]'
+    return ''.join(c for c in s if c in allowed or c.isspace()).strip()
+
+def normalize_string(s):
+    import unicodedata
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii")
+    s = s.lower()
+    return ''.join(c for c in s if c.isalnum() or c.isspace()).strip()
 
 def get_duration_seconds(mp3_path: str) -> int:
     return int(MP3(mp3_path).info.length)
 
+def get_apple_cover(album_name, artist_name, track_name=None):
+    entities = ['album']
+    if track_name:
+        entities.append('song')
 
-def insert_metadata(mp3_path: str, info: dict):
+    queries = [f"{album_name} {artist_name}"]
+    if track_name and track_name.lower() != album_name.lower():
+        queries.append(f"{track_name} {artist_name}")
+
+    params_base = {
+        "media": "music",
+        "limit": 10
+    }
+    album_norm = normalize_string(album_name)
+    artist_norm = normalize_string(artist_name)
+    track_norm = normalize_string(track_name) if track_name else None
+
+    fallback_candidates = []
+
+    for entity in entities:
+        for query in queries:
+            params = params_base.copy()
+            params["term"] = query
+            params["entity"] = entity
+            response = requests.get("https://itunes.apple.com/search", params=params, timeout=10)
+            results = response.json().get("results", [])
+            fallback_candidates.extend(results)
+
+            # 1. Exact album/artist match
+            for result in results:
+                result_album = normalize_string(result.get("collectionName", ""))
+                result_artist = normalize_string(result.get("artistName", ""))
+                if album_norm == result_album and artist_norm == result_artist:
+                    artwork = result.get("artworkUrl100")
+                    if artwork:
+                        return artwork.replace("100x100bb", "1400x1400bb")
+
+            # 2. Partial contains album/artist match
+            for result in results:
+                result_album = normalize_string(result.get("collectionName", ""))
+                result_artist = normalize_string(result.get("artistName", ""))
+                if artist_norm == result_artist and (album_norm in result_album or result_album in album_norm):
+                    artwork = result.get("artworkUrl100")
+                    if artwork:
+                        return artwork.replace("100x100bb", "1400x1400bb")
+
+            # 3. Artist only match
+            for result in results:
+                result_artist = normalize_string(result.get("artistName", ""))
+                if artist_norm == result_artist:
+                    artwork = result.get("artworkUrl100")
+                    if artwork:
+                        return artwork.replace("100x100bb", "1400x1400bb")
+
+    # 4. Fallback to first result
+    for candidate in fallback_candidates:
+        artwork = candidate.get("artworkUrl100")
+        if artwork:
+            console.print(f"[yellow]Warning: No strong match for cover, using first result.[/yellow]")
+            return artwork.replace("100x100bb", "1400x1400bb")
+
+    return None
+
+def insert_metadata(mp3_path: str, info: dict, track_num: int):
     try:
         audio = ID3(mp3_path)
     except error.ID3NoHeaderError:
         audio = ID3()
 
     title = info.get("title", "Unknown Title")
-    artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
+    raw_artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
+    artist = re.split(r",|&| feat\.?| featuring ", raw_artist, flags=re.IGNORECASE)[0].strip()
     album = info.get("album") or "Unknown Album"
 
     audio["TIT2"] = TIT2(encoding=3, text=title)
     audio["TPE1"] = TPE1(encoding=3, text=artist)
     audio["TALB"] = TALB(encoding=3, text=album)
+    audio["TRCK"] = TRCK(encoding=3, text=str(track_num))
 
-    thumb_url = info.get("thumbnail")
+    thumb_url = get_apple_cover(album, artist, title)
     if thumb_url:
         try:
             response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
             img_data = response.content
             mime = "image/png" if thumb_url.lower().endswith(".png") else "image/jpeg"
             audio["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=img_data)
-            console.print("[green]Embedded cover art[/green]")
-        except Exception as e:
-            console.print(f"[yellow]Cover art skipped: {e}[/yellow]")
+        except Exception:
+            pass
+
+    slyrics, _ = fetch_lyrics(artist, title, album, get_duration_seconds(mp3_path))
+    if slyrics:
+        save_lrc(slyrics, mp3_path)
 
     audio.save(mp3_path)
-    console.print("[green]Metadata saved[/green]")
 
+def fetch_lyrics(artist: str, title: str, album: str, duration: int) -> Tuple[Optional[str], Optional[str]]:
+    def _fetch():
+        artist_clean = clean_lyrics_string(artist)
+        title_clean = clean_lyrics_string(title)
+        album_clean = clean_lyrics_string(album)
+        params = {
+            "artist_name": artist_clean,
+            "track_name": title_clean,
+            "album_name": album_clean,
+            "duration": str(duration)
+        }
+        response = requests.get(
+            "https://lrclib.net/api/search",
+            params=params,
+            timeout=10,
+            headers={"User-Agent": "SpotifyLyricsFetcher/1.0"}
+        )
+        response.raise_for_status()
+        return response.json()
+    try:
+        data = _fetch()
+        if not data or not isinstance(data, list) or len(data) == 0:
+            return None, None
+        best_match = data[0]
+        return best_match.get("syncedLyrics"), best_match.get("plainLyrics")
+    except Exception as e:
+        console.print(f"[yellow]Lyrics API error: {str(e)}[/yellow]")
+        return None, None
+
+def save_lrc(lyrics: str, audio_path: str) -> bool:
+    if not lyrics or not audio_path:
+        return False
+    try:
+        base_path = os.path.splitext(audio_path)[0]
+        lrc_path = f"{base_path}.lrc"
+        with open(lrc_path, "w", encoding="utf-8") as f:
+            f.write(lyrics)
+        console.print(f"[green]✓ Saved lyrics:[/green] {os.path.basename(lrc_path)}")
+        return True
+    except Exception as e:
+        console.print(f"[red]✗ Failed to write lyrics:[/red] {str(e)}")
+        return False
 
 def process_song(url: str, folder: str, index: int, total: int):
-    for attempt in range(1, 4):
+    for attempt in range(1, 3):
         console.print(f"\n[bold blue][{index}/{total}] Attempt {attempt} - {url}[/bold blue]")
         try:
             mp3_path, info = download_song(url, folder, use_order_prefix=True, index=index)
             if not os.path.isfile(mp3_path) or os.path.getsize(mp3_path) < 1024:
                 raise RuntimeError("Downloaded MP3 missing or too small after conversion.")
 
-            insert_metadata(mp3_path, info)
+            insert_metadata(mp3_path, info, index)
             console.print(f"[green]Finished:[/green] {os.path.basename(mp3_path)}")
             return
 
@@ -230,7 +354,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     console.print(f"\nProcessing [bold]{len(urls)}[/bold] URL(s)")
-    console.print(f"Output directory: [cyan]{output_dir}[/cyan]")
+    console.print(f"[bold yellow]Output directory: {output_dir}[/bold yellow]")
 
     for i, url in enumerate(urls, 1):
         console.rule(f"[bold green]Processing URL {i}/{len(urls)}[/bold green]")
