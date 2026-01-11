@@ -125,85 +125,74 @@ def download_song(url: str, output_folder: str, use_order_prefix=False, index=0)
 
     return full_path, info
 
-def clean_lyrics_string(s):
-    s = unicodedata.normalize("NFKD", s)
-    s = s.encode("ascii", "ignore").decode("ascii")
-    s = s.replace('"', '').replace("'", '')
-    allowed = string.ascii_letters + string.digits + ' -_()[]'
-    return ''.join(c for c in s if c in allowed or c.isspace()).strip()
+REMOVE_WORDS = {
+    "feat", "ft", "featuring", "with",
+    "remaster", "remastered", "remastering",
+    "live", "edit", "edition", "version", "mix", "mono", "stereo",
+    "radio", "radioedit", "extended", "club", "dance",
+    "original", "album", "single",
+    "bonus", "deluxe", "expanded", "anniversary",
+    "explicit", "clean",
+    "demo", "rough", "instrumental", "acoustic", "karaoke",
+    "soundtrack", "ost",
+    "from", "motion", "picture",
+    "theme", "score",
+    "pt", "part", "vol", "volume",
+    "disc", "cd", "track",
+    "remix", "rework", "vip", "bootleg",
+    "cover", "tribute",
+    "intro", "outro", "interlude",
+    "official", "video", "audio"
+}
 
-def normalize_string(s):
-    import unicodedata
-    s = unicodedata.normalize("NFKD", s)
-    s = s.encode("ascii", "ignore").decode("ascii")
+BRACKETS_RE = re.compile(r'[\(\[\{].*?[\)\]\}]', re.UNICODE)
+CLEAN_RE = re.compile(r"[^\w\s']", re.UNICODE)
+
+def normalize_string(s: str) -> str:
+    if not s:
+        return ""
+
+    s = BRACKETS_RE.sub(" ", s)
     s = s.lower()
-    return ''.join(c for c in s if c.isalnum() or c.isspace()).strip()
+    s = s.replace("&", " and ")
+    s = CLEAN_RE.sub(" ", s)
+
+    words = [w for w in s.split() if w not in REMOVE_WORDS]
+
+    return " ".join(words)
 
 def get_duration_seconds(mp3_path: str) -> int:
     return int(MP3(mp3_path).info.length)
 
 def get_apple_cover(album_name, artist_name, track_name=None):
-    entities = ['album']
+    query_parts = [album_name, artist_name]
     if track_name:
-        entities.append('song')
+        query_parts.insert(0, track_name)
 
-    queries = [f"{album_name} {artist_name}"]
-    if track_name and track_name.lower() != album_name.lower():
-        queries.append(f"{track_name} {artist_name}")
+    query = " ".join(query_parts)
 
-    params_base = {
+    params = {
+        "term": query,
         "media": "music",
-        "limit": 10
+        "limit": 1
     }
-    album_norm = normalize_string(album_name)
-    artist_norm = normalize_string(artist_name)
-    track_norm = normalize_string(track_name) if track_name else None
 
-    fallback_candidates = []
+    response = requests.get(
+        "https://itunes.apple.com/search",
+        params=params,
+        timeout=16
+    )
+    response.raise_for_status()
 
-    for entity in entities:
-        for query in queries:
-            params = params_base.copy()
-            params["term"] = query
-            params["entity"] = entity
-            response = requests.get("https://itunes.apple.com/search", params=params, timeout=10)
-            results = response.json().get("results", [])
-            fallback_candidates.extend(results)
+    results = response.json().get("results", [])
+    if not results:
+        return None
 
-            # 1. Exact album/artist match
-            for result in results:
-                result_album = normalize_string(result.get("collectionName", ""))
-                result_artist = normalize_string(result.get("artistName", ""))
-                if album_norm == result_album and artist_norm == result_artist:
-                    artwork = result.get("artworkUrl100")
-                    if artwork:
-                        return artwork.replace("100x100bb", "1400x1400bb")
+    artwork = results[0].get("artworkUrl100")
+    if not artwork:
+        return None
 
-            # 2. Partial contains album/artist match
-            for result in results:
-                result_album = normalize_string(result.get("collectionName", ""))
-                result_artist = normalize_string(result.get("artistName", ""))
-                if artist_norm == result_artist and (album_norm in result_album or result_album in album_norm):
-                    artwork = result.get("artworkUrl100")
-                    if artwork:
-                        return artwork.replace("100x100bb", "1400x1400bb")
-
-            # 3. Artist only match
-            for result in results:
-                result_artist = normalize_string(result.get("artistName", ""))
-                if artist_norm == result_artist:
-                    artwork = result.get("artworkUrl100")
-                    if artwork:
-                        return artwork.replace("100x100bb", "1400x1400bb")
-
-    # 4. Fallback to first result
-    for candidate in fallback_candidates:
-        artwork = candidate.get("artworkUrl100")
-        if artwork:
-            console.print(f"[yellow]Warning: No strong match for cover, using first result.[/yellow]")
-            return artwork.replace("100x100bb", "1400x1400bb")
-
-    return None
+    return artwork.replace("100x100bb", "1400x1400bb")
 
 def insert_metadata(mp3_path: str, info: dict, track_num: int):
     try:
@@ -221,7 +210,8 @@ def insert_metadata(mp3_path: str, info: dict, track_num: int):
     audio["TALB"] = TALB(encoding=3, text=album)
     audio["TRCK"] = TRCK(encoding=3, text=str(track_num))
 
-    thumb_url = get_apple_cover(album, artist, title)
+    thumb_url = get_apple_cover(normalize_string(album), normalize_string(artist), normalize_string(title))
+
     if thumb_url:
         try:
             response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
@@ -237,34 +227,65 @@ def insert_metadata(mp3_path: str, info: dict, track_num: int):
 
     audio.save(mp3_path)
 
-def fetch_lyrics(artist: str, title: str, album: str, duration: int) -> Tuple[Optional[str], Optional[str]]:
-    def _fetch():
-        artist_clean = clean_lyrics_string(artist)
-        title_clean = clean_lyrics_string(title)
-        album_clean = clean_lyrics_string(album)
-        params = {
-            "artist_name": artist_clean,
-            "track_name": title_clean,
-            "album_name": album_clean,
-            "duration": str(duration)
-        }
-        response = requests.get(
-            "https://lrclib.net/api/search",
-            params=params,
-            timeout=10,
-            headers={"User-Agent": "SpotifyLyricsFetcher/1.0"}
-        )
-        response.raise_for_status()
-        return response.json()
-    try:
-        data = _fetch()
-        if not data or not isinstance(data, list) or len(data) == 0:
+def fetch_lyrics(
+    artist: str,
+    title: str,
+    album: str,
+    duration: int,
+    retries: int = 2,
+    timeout: int = 20
+) -> Tuple[Optional[str], Optional[str]]:
+
+    artist_clean = normalize_string(artist)
+    title_clean = normalize_string(title)
+    album_clean = normalize_string(album)
+
+    if album_clean == "unknown album":
+        album_clean = ""
+
+    params = {
+        "track_name": title_clean,
+        "artist_name": artist_clean,
+        "album_name": album_clean,
+        "duration": str(duration),
+    }
+
+    last_exception = None
+
+    for attempt in range(retries + 1):
+        try:
+            console.print(params)
+
+            response = requests.get(
+                "https://lrclib.net/api/search",
+                params=params,
+                timeout=timeout,
+                headers={"User-Agent": "SpotifyLyricsFetcher/1.0"}
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            if not data or not isinstance(data, list):
+                return None, None
+
+            best_match = data[0]
+            return best_match.get("syncedLyrics"), best_match.get("plainLyrics")
+
+        except (requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.HTTPError) as e:
+            last_exception = e
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+                continue
+            break
+
+        except Exception as e:
+            console.print(f"[yellow]Lyrics API error: {e}[/yellow]")
             return None, None
-        best_match = data[0]
-        return best_match.get("syncedLyrics"), best_match.get("plainLyrics")
-    except Exception as e:
-        console.print(f"[yellow]Lyrics API error: {str(e)}[/yellow]")
-        return None, None
+
+    console.print(f"[yellow]Lyrics API failed after retries: {last_exception}[/yellow]")
+    return None, None
 
 def save_lrc(lyrics: str, audio_path: str) -> bool:
     if not lyrics or not audio_path:
