@@ -254,8 +254,6 @@ def fetch_lyrics(
 
     for attempt in range(retries + 1):
         try:
-            console.print(params)
-
             response = requests.get(
                 "https://lrclib.net/api/search",
                 params=params,
@@ -268,8 +266,14 @@ def fetch_lyrics(
             if not data or not isinstance(data, list):
                 return None, None
 
-            best_match = data[0]
-            return best_match.get("syncedLyrics"), best_match.get("plainLyrics")
+            for r in data:
+                if r.get("syncedLyrics"):
+                    return r.get("syncedLyrics"), r.get("plainLyrics")
+            for r in data:
+                if r.get("plainLyrics"):
+                    return None, r.get("plainLyrics")
+
+            return None, None
 
         except (requests.exceptions.Timeout,
                 requests.exceptions.ConnectionError,
