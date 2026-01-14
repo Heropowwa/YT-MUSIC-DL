@@ -165,25 +165,32 @@ def get_duration_seconds(mp3_path: str) -> int:
     return int(MP3(mp3_path).info.length)
 
 def get_apple_cover(album_name, artist_name, track_name=None):
-    query_parts = [album_name, artist_name]
-    if track_name:
-        query_parts.insert(0, track_name)
+    query_parts = []
 
-    query = " ".join(query_parts)
+    if track_name:
+        query_parts.append(track_name)
+    if artist_name:
+        query_parts.append(artist_name)
+    if album_name:
+        query_parts.append(album_name)
+
+    query = " ".join(query_parts).strip()
 
     params = {
         "term": query,
         "media": "music",
-        "limit": 1
-    }
+        "entity": "song",
+        "limit": 1,
+        "explicit": "Yes",
+}
 
     response = requests.get(
         "https://itunes.apple.com/search",
         params=params,
-        timeout=16
+        timeout=10
     )
-    response.raise_for_status()
 
+    response.raise_for_status()
     results = response.json().get("results", [])
     if not results:
         return None
@@ -227,6 +234,8 @@ def insert_metadata(mp3_path: str, info: dict, track_num: int):
 
     audio.save(mp3_path)
 
+TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]")
+
 def fetch_lyrics(
     artist: str,
     title: str,
@@ -267,11 +276,14 @@ def fetch_lyrics(
                 return None, None
 
             for r in data:
-                if r.get("syncedLyrics"):
-                    return r.get("syncedLyrics"), r.get("plainLyrics")
+                synced = r.get("syncedLyrics")
+                if synced and TIMESTAMP_RE.search(synced.strip()):
+                    return synced.strip(), r.get("plainLyrics")
+
             for r in data:
-                if r.get("plainLyrics"):
-                    return None, r.get("plainLyrics")
+                plain = r.get("plainLyrics")
+                if plain and plain.strip():
+                    return None, plain.strip()
 
             return None, None
 
