@@ -8,6 +8,7 @@ import random
 import subprocess
 import requests
 import shutil
+import argparse
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
 from queue import Queue, Empty
@@ -402,39 +403,58 @@ def worker_loop(worker_id: int, job_queue: Queue, progress: Progress, worker_tas
         job_queue.task_done()
 
 def main():
+    default_workers = min(4, (os.cpu_count() or 2))
+
+    parser = argparse.ArgumentParser(
+        description="A professional YouTube audio downloader with metadata and lyrics support.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    parser.add_argument(
+        "urls",
+        nargs="*",
+        help="YouTube URLs to download (video or playlist)"
+    )
+    parser.add_argument(
+        "-b", "--batch-file",
+        type=str,
+        help="Path to a text file containing a list of YouTube URLs (one per line)"
+    )
+    parser.add_argument(
+        "-o", "--output-dir",
+        type=str,
+        default=os.getcwd(),
+        help="Directory to save the downloaded audio files"
+    )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=default_workers,
+        help="Number of concurrent download workers"
+    )
+
+    args = parser.parse_args()
+
     console.print(Panel.fit("[bold cyan]YouTube Downloader[/bold cyan]", border_style="cyan"))
 
-    urls: List[str] = []
-    use_batch = console.input("Use a batch file? (y/n): ").strip().lower()
-    if use_batch == "y":
-        batch_file = console.input("Enter path to batch file: ").strip()
-        if batch_file and os.path.isfile(batch_file):
-            with open(batch_file, "r", encoding="utf-8") as f:
+    urls: List[str] = list(args.urls)
+
+    if args.batch_file:
+        if os.path.isfile(args.batch_file):
+            with open(args.batch_file, "r", encoding="utf-8") as f:
                 urls.extend([line.strip() for line in f if line.strip() and not line.startswith("#")])
         else:
-            console.print("[yellow]Batch file not found or invalid.[/yellow]")
-
-    while True:
-        url = console.input("Enter YouTube URL (or leave blank to finish): ").strip()
-        if not url:
-            break
-        urls.append(url)
+            console.print(f"[yellow]Warning: Batch file '{args.batch_file}' not found.[/yellow]")
 
     if not urls:
-        console.print("[red]No URLs provided. Exiting.[/red]")
-        return
+        parser.print_help()
+        console.print("\n[red]Error: No URLs provided. Please provide URLs directly or via a batch file.[/red]")
+        sys.exit(1)
 
-    output_dir = console.input("Enter output folder (leave empty for current directory): ").strip() or os.getcwd()
+    output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
-    default_workers = min(4, (os.cpu_count() or 2))
-    try:
-        worker_input = console.input(f"Workers [{default_workers}]: ").strip()
-        MAX_WORKERS = int(worker_input) if worker_input else default_workers
-    except Exception:
-        MAX_WORKERS = default_workers
-    if MAX_WORKERS < 1:
-        MAX_WORKERS = 1
+    MAX_WORKERS = max(1, args.workers)
 
     console.print(f"[green]Preparing tasks and expanding playlists...[/green]")
     tasks = build_task_list(urls, output_dir)

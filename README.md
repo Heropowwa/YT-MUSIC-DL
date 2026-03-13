@@ -1,94 +1,124 @@
----
+# 🎵 YouTube Music Downloader
 
-## 🎵 YouTube Music Downloader (MP3 with Metadata + Lyrics)
+A robust, multi-threaded command-line tool to download YouTube videos and playlists as high-quality 320kbps MP3s. It automatically fetches and embeds ID3 metadata, high-resolution cover art, and synced lyrics.
 
-A terminal-based Python tool to **download YouTube songs or playlists as high-quality MP3s**, with optional **metadata, cover art, and synced lyrics**.
+## ✨ Key Features
 
----
-
-### ✅ Features
-
-* Download individual videos or full playlists
-* Convert to 320kbps MP3 using `yt-dlp` + `ffmpeg`
-* Embed metadata (title, artist, album)
-* Embed high-res thumbnail as cover art
-* Auto-fetch synced and unsynced lyrics from LRCLib
-* Save lyrics as `.lrc` alongside MP3
-* Fully interactive CLI (no arguments, just input prompts)
+* **High-Quality Audio:** Extracts and converts audio to 320kbps MP3 using `yt-dlp` and `FFmpeg`.
+* **Smart Metadata:** Cleans up track titles and attempts to fetch accurate metadata (Artist, Title, Album).
+* **HD Cover Art:** Automatically searches and embeds high-resolution album artwork via the Apple Music API.
+* **Synced Lyrics:** Fetches synced (`.lrc`) or unsynced lyrics via [LRCLib](https://lrclib.net/) and embeds/saves them alongside the audio.
+* **Multi-Threaded:** Lightning-fast concurrent downloads using a customizable number of background workers.
+* **Beautiful CLI:** Real-time, responsive terminal progress bars powered by `Rich`.
+* **Batch Processing:** Pass individual URLs, full playlists, or a `.txt` file containing multiple links.
 
 ---
 
-### 📦 Requirements
+## ⚙️ Installation
 
-* Python 3.8+
-* `ffmpeg` installed and in your PATH
-* Install dependencies with:
+### 1. Prerequisites
+
+You must have **Python 3.8+** and **FFmpeg** installed on your system.
+
+* **Windows:** Download from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or install via winget: `winget install ffmpeg`
+* **macOS:** Install via Homebrew: `brew install ffmpeg`
+* **Linux:** Install via APT: `sudo apt install ffmpeg`
+
+### 2. Install Dependencies
+
+Clone the repository and install the required Python packages:
 
 ```bash
 pip install -r requirements.txt
+
 ```
+
+*(Dependencies include: `yt-dlp`, `mutagen`, `requests`, `rich`)*
 
 ---
 
-### 📥 Usage
+## 🚀 Usage
 
-Just run the script — it will guide you step-by-step:
+The script is entirely driven by command-line arguments, making it easy to automate or run as a background task.
+
+### Basic Syntax
 
 ```bash
-python g.py
+python downloader.py [URLS ...] [-o OUTPUT_DIR] [-b BATCH_FILE] [-w WORKERS]
+
 ```
 
-You'll be prompted for:
+### Examples
 
-* A batch file (optional)
-* YouTube links (one or more)
-* Output folder
-* Whether to include metadata
-* Whether to include cover art
-* Whether to fetch lyrics
+**1. Download a single song:**
+
+```bash
+python downloader.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
+
+```
+
+**2. Download a full playlist to a specific folder using 8 workers:**
+
+```bash
+python downloader.py "https://www.youtube.com/playlist?list=YOUR_PLAYLIST_ID" -o ./MyMusic -w 8
+
+```
+
+**3. Download from a text file:**
+
+```bash
+python downloader.py -b urls.txt -o ./Downloads
+
+```
+
+### Available Arguments
+
+| Argument | Short | Description | Default |
+| --- | --- | --- | --- |
+| `urls` |  | One or more YouTube URLs (videos or playlists) separated by spaces. | `None` |
+| `--output-dir` | `-o` | The directory where downloaded folders will be saved. | Current Directory |
+| `--batch-file` | `-b` | Path to a text file containing YouTube URLs. | `None` |
+| `--workers` | `-w` | Number of concurrent download threads. | `4` (or CPU count) |
+| `--help` | `-h` | Show the help menu and exit. |  |
 
 ---
 
-### 📁 Batch File Format
+## 📝 Batch File Format
 
-If using a batch file:
+If you use the `-b` or `--batch-file` flag, provide a standard text file with one URL per line. The script will automatically ignore blank lines and comments (lines starting with `#`).
 
-* One URL per line
-* Lines starting with `#` are ignored
+**Example (`urls.txt`):**
 
-Example (`urls.txt`):
+```text
+# Synthwave tracks
+https://www.youtube.com/watch?v=abc12345
+https://www.youtube.com/watch?v=xyz09876
 
-```
-https://www.youtube.com/watch?v=abc123
-https://www.youtube.com/playlist?list=xyz456
-# This is a comment
+# Lo-Fi Playlist
+https://www.youtube.com/playlist?list=PL1234567890
+
 ```
 
 ---
 
-### 🛠 Output
+## 📂 Output Structure
 
-Each song or playlist will be saved in a clean folder structure like:
+The script keeps your music organized. Single tracks are placed in a `Single_Track` folder, while playlists are saved in a folder named after the YouTube playlist.
+
+```text
+📁 Output_Directory/
+├── 📁 Single_Track/
+│   ├── 01 - Song Title.mp3
+│   └── 01 - Song Title.lrc         <-- (If synced lyrics are found)
+└── 📁 Vibes Playlist/
+    ├── 01 - First Song.mp3
+    ├── 02 - Second Song.mp3
+    └── 02 - Second Song.lrc
 
 ```
-output_dir/
-└── PlaylistName/
-    ├── Song Title.mp3
-    ├── Song Title.lrc  (if lyrics found)
-```
 
 ---
 
-### 💡 Notes
+## 🧾 License
 
-* Cover art is extracted from the highest-resolution thumbnail available.
-* Lyrics fetched from [lrclib.net](https://lrclib.net/).
-* Script uses `yt-dlp`, `mutagen`, `requests`, `rich`, and `tqdm`.
-
----
-
-### 🧾 License
-
-MIT License — free to use, modify, and share.
-
----
+Distributed under the MIT License. Free to use, modify, and share.
