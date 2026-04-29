@@ -5,9 +5,11 @@ import re
 import sys
 import time
 import random
+import base64
 import subprocess
 import requests
 import shutil
+import json
 import argparse
 from dataclasses import dataclass
 from typing import Optional, Tuple, List
@@ -15,8 +17,9 @@ from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yt_dlp
-from mutagen.mp3 import MP3
-from mutagen.id3 import ID3, APIC, TIT2, TPE1, TALB, TRCK, error
+from mutagen.oggopus import OggOpus
+from mutagen.flac import Picture
+import musicbrainzngs
 
 from rich.console import Console
 from rich.panel import Panel
@@ -31,6 +34,16 @@ from rich.progress import (
 )
 
 console = Console()
+
+# YOU NEED THIS TO MAKE METADATA REQUESTS
+# GET YOUR FREE API KEY FROM: https://acoustid.org/
+ACOUSTID_API_KEY = ""
+
+musicbrainzngs.set_useragent(
+    "YT_Audio_Downloader",
+    "1.1",
+    "https://github.com/Heropowwa/YT-MUSIC-DL"
+)
 
 REMOVE_WORDS = {
     "feat", "ft", "featuring", "with",
@@ -85,22 +98,100 @@ def retry_request(func, max_retries=3, backoff_factor=2, *args, **kwargs):
             console.print(f"[yellow]Attempt {attempt} failed: {e}. Retrying in {wait:.1f}s...[/yellow]")
             time.sleep(wait)
 
-def convert_to_mp3(input_path: str, output_path: str):
+def convert_to_opus(input_path: str, output_path: str):
     if not shutil.which("ffmpeg"):
         raise RuntimeError("FFmpeg not found. Please install FFmpeg.")
     command = [
         "ffmpeg", "-y", "-i", input_path,
-        "-vn", "-acodec", "libmp3lame", "-b:a", "320k",
+        "-vn", "-acodec", "libopus", "-b:a", "192k",
         output_path
     ]
     result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg conversion failed:\n{result.stderr.decode()}")
     if not os.path.isfile(output_path) or os.path.getsize(output_path) < 1024:
-        raise RuntimeError("Converted MP3 missing or too small.")
+        raise RuntimeError("Converted Opus file missing or too small.")
 
-def get_duration_seconds(mp3_path: str) -> int:
-    return int(MP3(mp3_path).info.length)
+def get_duration_seconds(opus_path: str) -> int:
+    return int(OggOpus(opus_path).info.length)
+
+def generate_local_fingerprint(file_path: str) -> Tuple[Optional[str], Optional[int]]:
+    if not shutil.which("fpcalc"):
+        console.print("[yellow]Warning: 'fpcalc' binary not found in PATH. Cannot generate fingerprint.[/yellow]")
+        return None, None
+
+    try:
+        result = subprocess.run(
+            ["fpcalc", "-json", file_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        data = json.loads(result.stdout)
+        return data.get("fingerprint"), data.get("duration")
+    except Exception as e:
+        console.print(f"[yellow]Failed to generate local fingerprint: {e}[/yellow]")
+        return None, None
+
+def get_metadata_via_picard_method(audio_path: str) -> dict:
+    if not ACOUSTID_API_KEY or ACOUSTID_API_KEY == "YOUR_ACOUSTID_API_KEY_HERE":
+        return {} 
+
+    fingerprint, duration = generate_local_fingerprint(audio_path)
+    if not fingerprint or not duration:
+        return {}
+
+    try:
+        response = requests.get(
+            "https://api.acoustid.org/v2/lookup",
+            params={
+                "client": ACOUSTID_API_KEY,
+                "meta": "recordings",
+                "duration": int(duration),
+                "fingerprint": fingerprint
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("status") != "ok" or not data.get("results"):
+            return {}
+
+        best_match = data["results"][0]
+        if "recordings" not in best_match or not best_match["recordings"]:
+            return {}
+
+        mbid = best_match["recordings"][0]["id"]
+        
+        mb_data = musicbrainzngs.get_recording_by_id(mbid, includes=["artists", "releases", "isrcs", "tags"])
+        recording = mb_data.get('recording', {})
+        
+        tags = {
+            "title": recording.get('title'),
+            "artist": recording.get('artist-credit-phrase'),
+            "musicbrainz_recordingid": mbid
+        }
+
+        if 'isrc-list' in recording and recording['isrc-list']:
+            tags['isrc'] = recording['isrc-list'][0]
+            
+        if 'release-list' in recording and recording['release-list']:
+            release = recording['release-list'][0]
+            tags['album'] = release.get('title')
+            tags['date'] = release.get('date')
+            tags['musicbrainz_releaseid'] = release.get('id')
+            
+            if 'label-info-list' in release and release['label-info-list']:
+                label_info = release['label-info-list'][0]
+                tags['publisher'] = label_info.get('label', {}).get('name')
+                
+        return {k: v for k, v in tags.items() if v}
+        
+    except Exception as e:
+        console.print(f"[yellow]Picard-style metadata lookup failed: {e}[/yellow]")
+        return {}
 
 def get_apple_cover(album_name, artist_name, track_name=None):
     query_parts = []
@@ -189,20 +280,34 @@ def save_lrc(lyrics: str, audio_path: str) -> bool:
         console.print(f"[red]✗ Failed to write lyrics:[/red] {str(e)}")
         return False
 
-def insert_metadata(mp3_path: str, info: dict, track_num: int):
+def insert_metadata(opus_path: str, info: dict, track_num: int):
     try:
-        audio = ID3(mp3_path)
-    except error.ID3NoHeaderError:
-        audio = ID3()
-    title = info.get("title", "Unknown Title")
-    raw_artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-    artist = re.split(r",|&| feat\.?| featuring ", raw_artist, flags=re.IGNORECASE)[0].strip()
-    album = info.get("album") or "Unknown Album"
+        audio = OggOpus(opus_path)
+    except Exception as e:
+        console.print(f"[red]Could not open Opus file to tag: {e}[/red]")
+        return
+        
+    fp_info = get_metadata_via_picard_method(opus_path)
 
-    audio["TIT2"] = TIT2(encoding=3, text=title)
-    audio["TPE1"] = TPE1(encoding=3, text=artist)
-    audio["TALB"] = TALB(encoding=3, text=album)
-    audio["TRCK"] = TRCK(encoding=3, text=str(track_num))
+    for key, val in fp_info.items():
+        audio[key] = [str(val)]
+
+    if 'title' not in audio:
+        audio['title'] = [info.get("title", "Unknown Title")]
+        
+    if 'artist' not in audio:
+        raw_artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
+        artist_clean = re.split(r",|&| feat\.?| featuring ", raw_artist, flags=re.IGNORECASE)[0].strip()
+        audio['artist'] = [artist_clean]
+        
+    if 'album' not in audio:
+        audio['album'] = [info.get("album") or "Unknown Album"]
+
+    audio['tracknumber'] = [str(track_num)]
+
+    album = audio.get("album", [""])[0]
+    artist = audio.get("artist", [""])[0]
+    title = audio.get("title", [""])[0]
 
     thumb_url = None
     try:
@@ -215,18 +320,29 @@ def insert_metadata(mp3_path: str, info: dict, track_num: int):
             response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
             img_data = response.content
             mime = "image/png" if thumb_url.lower().endswith(".png") else "image/jpeg"
-            audio["APIC"] = APIC(encoding=3, mime=mime, type=3, desc="Cover", data=img_data)
-        except Exception:
-            pass
+            
+            pic = Picture()
+            pic.data = img_data
+            pic.type = 3
+            pic.mime = mime
+            pic.desc = "Cover"
+            
+            pic_data = pic.write()
+            b64_data = base64.b64encode(pic_data).decode("ascii")
+            audio["metadata_block_picture"] = [b64_data]
+            
+        except Exception as e:
+            console.print(f"[yellow]Could not embed Apple Cover art: {e}[/yellow]")
 
     try:
-        slyrics, _ = fetch_lyrics(artist, title, album, get_duration_seconds(mp3_path))
+        slyrics, _ = fetch_lyrics(artist, title, album, get_duration_seconds(opus_path))
         if slyrics:
-            save_lrc(slyrics, mp3_path)
+            save_lrc(slyrics, opus_path)
+            audio['lyrics'] = [slyrics]
     except Exception:
         pass
 
-    audio.save(mp3_path)
+    audio.save()
 
 @dataclass
 class SongTask:
@@ -328,7 +444,11 @@ def worker_loop(worker_id: int, job_queue: Queue, progress: Progress, worker_tas
         hook = WorkerDownloadHook(progress, worker_task_id)
         ydl_opts = {
             "format": "bestaudio/best",
-            "outtmpl": outtmpl,
+            "outtmpl": os.path.join(song.folder, f"{safe_prefix}%(title)s.%(ext)s"),
+            "postprocessors": [{
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "opus",
+            }],
             "quiet": True,
             "no_warnings": True,
             "ignoreerrors": False,
@@ -344,31 +464,20 @@ def worker_loop(worker_id: int, job_queue: Queue, progress: Progress, worker_tas
                         if info is None:
                             raise RuntimeError("yt_dlp returned None.")
                         return info, ydl
+                
                 info, ydl_instance = retry_request(_dl, max_retries=2)
-                downloaded_path = ydl_instance.prepare_filename(info)
-                if not os.path.isfile(downloaded_path) or os.path.getsize(downloaded_path) < 1024:
+                
+                final_path = ydl_instance.prepare_filename(info)
+                full_path = os.path.splitext(final_path)[0] + ".opus"
+
+                if not os.path.isfile(full_path) or os.path.getsize(full_path) < 1024:
                     raise RuntimeError("Downloaded file missing or too small.")
 
-                title = info.get('title', 'Unknown_Title')
-                safe_title = sanitize_filename(title)
-                filename = f"{safe_prefix} {safe_title}.mp3"
-                full_path = os.path.join(song.folder, filename)
-
                 try:
-                    progress.update(worker_task_id, description=f"{short_desc} • converting")
+                    progress.update(worker_task_id, description=f"{short_desc} • tagging (MusicBrainz)")
                 except Exception:
                     pass
-                convert_to_mp3(downloaded_path, full_path)
-
-                try:
-                    os.remove(downloaded_path)
-                except Exception:
-                    pass
-
-                try:
-                    progress.update(worker_task_id, description=f"{short_desc} • tagging")
-                except Exception:
-                    pass
+                
                 try:
                     insert_metadata(full_path, info, song.index)
                 except Exception:

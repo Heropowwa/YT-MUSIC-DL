@@ -1,124 +1,225 @@
-# 🎵 YouTube Music Downloader
+# 🎵 YouTube Audio Downloader
 
-A robust, multi-threaded command-line tool to download YouTube videos and playlists as high-quality 320kbps MP3s. It automatically fetches and embeds ID3 metadata, high-resolution cover art, and synced lyrics.
-
-## ✨ Key Features
-
-* **High-Quality Audio:** Extracts and converts audio to 320kbps MP3 using `yt-dlp` and `FFmpeg`.
-* **Smart Metadata:** Cleans up track titles and attempts to fetch accurate metadata (Artist, Title, Album).
-* **HD Cover Art:** Automatically searches and embeds high-resolution album artwork via the Apple Music API.
-* **Synced Lyrics:** Fetches synced (`.lrc`) or unsynced lyrics via [LRCLib](https://lrclib.net/) and embeds/saves them alongside the audio.
-* **Multi-Threaded:** Lightning-fast concurrent downloads using a customizable number of background workers.
-* **Beautiful CLI:** Real-time, responsive terminal progress bars powered by `Rich`.
-* **Batch Processing:** Pass individual URLs, full playlists, or a `.txt` file containing multiple links.
+A fast, multi-threaded command-line tool for downloading audio from YouTube videos and playlists in **high-quality Opus format**.
+It automatically expands playlists, tags tracks with metadata, fetches cover art, and saves synced lyrics when available.
 
 ---
 
-## ⚙️ Installation
+## ✨ Features
 
-### 1. Prerequisites
+* 🎧 **High-quality audio** in `.opus`
+* ⚡ **Multi-threaded downloads** (configurable workers)
+* 📜 **Playlist support** with automatic numbering
+* 📂 **Batch file support** for bulk downloads
+* 🧠 **Smart metadata tagging** using AcoustID + MusicBrainz
+* 🖼️ **Cover art embedding** via Apple Music search
+* 🎤 **Lyrics support**
 
-You must have **Python 3.8+** and **FFmpeg** installed on your system.
+  * Synced `.lrc` lyrics
+  * Plain lyrics fallback
+* 🧹 **Clean filenames** and organized folders
+* 🎨 **Rich CLI UI** with progress bars
 
-* **Windows:** Download from [gyan.dev](https://www.gyan.dev/ffmpeg/builds/) or install via winget: `winget install ffmpeg`
-* **macOS:** Install via Homebrew: `brew install ffmpeg`
-* **Linux:** Install via APT: `sudo apt install ffmpeg`
+---
 
-### 2. Install Dependencies
+## ⚙️ Requirements
 
-Clone the repository and install the required Python packages:
+### 🐍 Python
+
+* Python **3.8+**
+
+### 🧰 System Dependencies
+
+#### FFmpeg
+
+Used for audio conversion.
+
+* **Windows:** `winget install ffmpeg`
+* **macOS:** `brew install ffmpeg`
+* **Linux:** `sudo apt install ffmpeg`
+
+#### fpcalc (AcoustID)
+
+Used for fingerprint-based metadata.
+
+Install from: [https://acoustid.org/](https://acoustid.org/)
+
+---
+
+## 📦 Installation
 
 ```bash
 pip install -r requirements.txt
-
 ```
 
-*(Dependencies include: `yt-dlp`, `mutagen`, `requests`, `rich`)*
+### Dependencies
+
+* `yt-dlp`
+* `mutagen`
+* `musicbrainzngs`
+* `requests`
+* `rich`
+
+---
+
+## 🔑 AcoustID API Key
+
+Set your key in the script:
+
+```python
+ACOUSTID_API_KEY = "YOUR_API_KEY_HERE"
+```
+
+Get one for free: [https://acoustid.org/](https://acoustid.org/)
+
+> Without it, metadata lookup will be limited.
 
 ---
 
 ## 🚀 Usage
 
-The script is entirely driven by command-line arguments, making it easy to automate or run as a background task.
-
-### Basic Syntax
+### Basic syntax
 
 ```bash
-python downloader.py [URLS ...] [-o OUTPUT_DIR] [-b BATCH_FILE] [-w WORKERS]
-
+python downloader.py [URLS ...] [-b BATCH_FILE] [-o OUTPUT_DIR] [-w WORKERS]
 ```
-
-### Examples
-
-**1. Download a single song:**
-
-```bash
-python downloader.py "https://www.youtube.com/watch?v=YOUR_VIDEO_ID"
-
-```
-
-**2. Download a full playlist to a specific folder using 8 workers:**
-
-```bash
-python downloader.py "https://www.youtube.com/playlist?list=YOUR_PLAYLIST_ID" -o ./MyMusic -w 8
-
-```
-
-**3. Download from a text file:**
-
-```bash
-python downloader.py -b urls.txt -o ./Downloads
-
-```
-
-### Available Arguments
-
-| Argument | Short | Description | Default |
-| --- | --- | --- | --- |
-| `urls` |  | One or more YouTube URLs (videos or playlists) separated by spaces. | `None` |
-| `--output-dir` | `-o` | The directory where downloaded folders will be saved. | Current Directory |
-| `--batch-file` | `-b` | Path to a text file containing YouTube URLs. | `None` |
-| `--workers` | `-w` | Number of concurrent download threads. | `4` (or CPU count) |
-| `--help` | `-h` | Show the help menu and exit. |  |
 
 ---
 
-## 📝 Batch File Format
+### 🔹 Examples
 
-If you use the `-b` or `--batch-file` flag, provide a standard text file with one URL per line. The script will automatically ignore blank lines and comments (lines starting with `#`).
+#### Download a single video
 
-**Example (`urls.txt`):**
+```bash
+python downloader.py "https://www.youtube.com/watch?v=VIDEO_ID"
+```
 
-```text
-# Synthwave tracks
-https://www.youtube.com/watch?v=abc12345
-https://www.youtube.com/watch?v=xyz09876
+#### Download a playlist
 
-# Lo-Fi Playlist
-https://www.youtube.com/playlist?list=PL1234567890
+```bash
+python downloader.py "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+```
 
+#### Multiple URLs
+
+```bash
+python downloader.py URL1 URL2 URL3
+```
+
+#### Batch file
+
+```bash
+python downloader.py -b urls.txt
+```
+
+#### Custom output folder
+
+```bash
+python downloader.py -o ./Downloads
+```
+
+#### More workers
+
+```bash
+python downloader.py -w 8
+```
+
+---
+
+## 🧾 Arguments
+
+| Argument       | Short | Description                      | Default     |
+| -------------- | ----- | -------------------------------- | ----------- |
+| `urls`         | —     | YouTube URLs (video or playlist) | None        |
+| `--batch-file` | `-b`  | File with URLs                   | None        |
+| `--output-dir` | `-o`  | Output folder                    | Current dir |
+| `--workers`    | `-w`  | Parallel downloads               | CPU-based   |
+
+---
+
+## 📄 Batch File Format
+
+Example `urls.txt`:
+
+```
+# Singles
+https://www.youtube.com/watch?v=abc123
+https://www.youtube.com/watch?v=def456
+
+# Playlist
+https://www.youtube.com/playlist?list=PL123456
 ```
 
 ---
 
 ## 📂 Output Structure
 
-The script keeps your music organized. Single tracks are placed in a `Single_Track` folder, while playlists are saved in a folder named after the YouTube playlist.
+### Single track
 
-```text
-📁 Output_Directory/
-├── 📁 Single_Track/
-│   ├── 01 - Song Title.mp3
-│   └── 01 - Song Title.lrc         <-- (If synced lyrics are found)
-└── 📁 Vibes Playlist/
-    ├── 01 - First Song.mp3
-    ├── 02 - Second Song.mp3
-    └── 02 - Second Song.lrc
+```
+Output/
+└── Single_Track/
+    ├── 01 - Song.opus
+    └── 01 - Song.lrc
+```
 
+### Playlist
+
+```
+Output/
+└── Playlist Name/
+    ├── 01 - Track.opus
+    ├── 01 - Track.lrc
+    ├── 02 - Track.opus
+    └── 02 - Track.lrc
 ```
 
 ---
 
-## 🧾 License
+## 🏷️ Metadata
 
-Distributed under the MIT License. Free to use, modify, and share.
+The script attempts to:
+
+* Extract clean **title / artist**
+* Match using **AcoustID fingerprint**
+* Fetch metadata from **MusicBrainz**
+* Embed **cover art**
+* Save **lyrics**
+
+---
+
+## ⚠️ Notes
+
+* Requires `ffmpeg` in PATH
+* Requires `fpcalc` for fingerprinting
+* Metadata depends on external databases
+* Not all songs have lyrics or artwork
+* YouTube titles are cleaned automatically (removes “feat.”, “remix”, etc.)
+
+---
+
+## 🧪 Troubleshooting
+
+### FFmpeg not found
+
+Install it and ensure it's in PATH.
+
+### fpcalc not found
+
+Install AcoustID tools.
+
+### Missing metadata
+
+* Check API key
+* Check fpcalc
+* Some tracks simply won’t match
+
+### No lyrics
+
+Track may not exist in LRCLib.
+
+---
+
+## 📜 License
+
+MIT License – free to use, modify, and share.
