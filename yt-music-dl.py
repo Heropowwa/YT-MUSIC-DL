@@ -194,30 +194,57 @@ def get_metadata_via_picard_method(audio_path: str) -> dict:
         return {}
 
 def get_apple_cover(album_name, artist_name, track_name=None):
-    query_parts = []
+    # 1. Strip out "Unknown" defaults that pollute the iTunes search
+    if album_name and "unknown" in album_name.lower():
+        album_name = ""
+    if artist_name and "unknown" in artist_name.lower():
+        artist_name = ""
+    if track_name and "unknown" in track_name.lower():
+        track_name = ""
+
+    # 2. Build a robust list of fallback queries
+    queries = []
+
+    # Try the most specific combination first (like your second script)
+    full_query = " ".join(filter(None, [track_name, artist_name, album_name]))
+    if full_query:
+        queries.append(full_query)
+
+    # Add progressively broader fallbacks (like your first script, but safer)
+    if track_name and artist_name:
+        queries.append(f"{track_name} {artist_name}")
+    if artist_name and album_name:
+        queries.append(f"{artist_name} {album_name}")
     if track_name:
-        query_parts.append(track_name)
+        queries.append(track_name)
     if artist_name:
-        query_parts.append(artist_name)
-    if album_name:
-        query_parts.append(album_name)
-    query = " ".join(query_parts).strip()
-    params = {
-        "term": query,
-        "media": "music",
-        "entity": "song",
-        "limit": 1,
-        "explicit": "Yes",
-    }
-    response = requests.get("https://itunes.apple.com/search", params=params, timeout=10)
-    response.raise_for_status()
-    results = response.json().get("results", [])
-    if not results:
-        return None
-    artwork = results[0].get("artworkUrl100")
-    if not artwork:
-        return None
-    return artwork.replace("100x100bb", "1400x1400bb")
+        queries.append(artist_name)
+
+    # 3. Try each query until iTunes returns a result
+    for query in queries:
+        query = query.strip()
+        if not query:
+            continue
+
+        params = {
+            "term": query,
+            "media": "music",
+            "entity": "song",
+            "limit": 1,
+            "explicit": "Yes",
+        }
+        try:
+            response = requests.get("https://itunes.apple.com/search", params=params, timeout=10)
+            response.raise_for_status()
+            results = response.json().get("results", [])
+
+            # If we got a hit, return the high-res artwork immediately
+            if results and results[0].get("artworkUrl100"):
+                return results[0].get("artworkUrl100").replace("100x100bb", "1400x1400bb")
+        except Exception:
+            pass # Ignore connection errors and try the next fallback query
+
+    return None
 
 TIMESTAMP_RE = re.compile(r"\[\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?\]")
 
@@ -286,56 +313,64 @@ def insert_metadata(opus_path: str, info: dict, track_num: int):
     except Exception as e:
         console.print(f"[red]Could not open Opus file to tag: {e}[/red]")
         return
-        
-    fp_info = get_metadata_via_picard_method(opus_path)
 
+    # --- 1. PREPARE YOUTUBE METADATA FOR COVER SEARCH ---
+    # We grab these now so MusicBrainz tags don't interfere
+    yt_title = info.get("title", "")
+    yt_uploader = info.get("uploader", "")
+    # Clean the uploader name (e.g., removing " - Topic")
+    yt_artist = yt_uploader.replace(" - Topic", "").strip()
+
+    # --- 2. FETCH & APPLY MUSICBRAINZ TAGS (For File Organization) ---
+    fp_info = get_metadata_via_picard_method(opus_path)
     for key, val in fp_info.items():
         audio[key] = [str(val)]
 
+    # Fallback for file tags if MusicBrainz found nothing
     if 'title' not in audio:
-        audio['title'] = [info.get("title", "Unknown Title")]
-        
+        audio['title'] = [yt_title or "Unknown Title"]
     if 'artist' not in audio:
-        raw_artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
-        artist_clean = re.split(r",|&| feat\.?| featuring ", raw_artist, flags=re.IGNORECASE)[0].strip()
-        audio['artist'] = [artist_clean]
-        
+        audio['artist'] = [yt_artist or "Unknown Artist"]
     if 'album' not in audio:
         audio['album'] = [info.get("album") or "Unknown Album"]
 
     audio['tracknumber'] = [str(track_num)]
 
-    album = audio.get("album", [""])[0]
-    artist = audio.get("artist", [""])[0]
-    title = audio.get("title", [""])[0]
-
+    # --- 3. FETCH COVER ART (STRICTLY USING YOUTUBE METADATA) ---
     thumb_url = None
     try:
-        thumb_url = get_apple_cover(normalize_string(album), normalize_string(artist), normalize_string(title))
+        # We pass only the YouTube title and uploader to the search
+        thumb_url = get_apple_cover("", normalize_string(yt_artist), normalize_string(yt_title))
     except Exception:
         thumb_url = None
 
+    # --- 4. EMBED ARTWORK ---
     if thumb_url:
         try:
             response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
             img_data = response.content
             mime = "image/png" if thumb_url.lower().endswith(".png") else "image/jpeg"
-            
+
             pic = Picture()
             pic.data = img_data
             pic.type = 3
             pic.mime = mime
             pic.desc = "Cover"
-            
+
             pic_data = pic.write()
             b64_data = base64.b64encode(pic_data).decode("ascii")
             audio["metadata_block_picture"] = [b64_data]
-            
         except Exception as e:
             console.print(f"[yellow]Could not embed Apple Cover art: {e}[/yellow]")
 
+    # --- 5. LYRICS ---
     try:
-        slyrics, _ = fetch_lyrics(artist, title, album, get_duration_seconds(opus_path))
+        # Use the finalized tags for lyrics search as they are usually more accurate
+        artist_for_lyr = audio.get("artist", [""])[0]
+        title_for_lyr = audio.get("title", [""])[0]
+        album_for_lyr = audio.get("album", [""])[0]
+
+        slyrics, _ = fetch_lyrics(artist_for_lyr, title_for_lyr, album_for_lyr, get_duration_seconds(opus_path))
         if slyrics:
             save_lrc(slyrics, opus_path)
             audio['lyrics'] = [slyrics]
