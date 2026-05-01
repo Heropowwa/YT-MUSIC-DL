@@ -136,7 +136,7 @@ def generate_local_fingerprint(file_path: str) -> Tuple[Optional[str], Optional[
 
 def get_metadata_via_picard_method(audio_path: str) -> dict:
     if not ACOUSTID_API_KEY or ACOUSTID_API_KEY == "YOUR_ACOUSTID_API_KEY_HERE":
-        return {} 
+        return {}
 
     fingerprint, duration = generate_local_fingerprint(audio_path)
     if not fingerprint or not duration:
@@ -164,10 +164,10 @@ def get_metadata_via_picard_method(audio_path: str) -> dict:
             return {}
 
         mbid = best_match["recordings"][0]["id"]
-        
+
         mb_data = musicbrainzngs.get_recording_by_id(mbid, includes=["artists", "releases", "isrcs", "tags"])
         recording = mb_data.get('recording', {})
-        
+
         tags = {
             "title": recording.get('title'),
             "artist": recording.get('artist-credit-phrase'),
@@ -176,19 +176,19 @@ def get_metadata_via_picard_method(audio_path: str) -> dict:
 
         if 'isrc-list' in recording and recording['isrc-list']:
             tags['isrc'] = recording['isrc-list'][0]
-            
+
         if 'release-list' in recording and recording['release-list']:
             release = recording['release-list'][0]
             tags['album'] = release.get('title')
             tags['date'] = release.get('date')
             tags['musicbrainz_releaseid'] = release.get('id')
-            
+
             if 'label-info-list' in release and release['label-info-list']:
                 label_info = release['label-info-list'][0]
                 tags['publisher'] = label_info.get('label', {}).get('name')
-                
+
         return {k: v for k, v in tags.items() if v}
-        
+
     except Exception as e:
         console.print(f"[yellow]Picard-style metadata lookup failed: {e}[/yellow]")
         return {}
@@ -314,37 +314,37 @@ def insert_metadata(opus_path: str, info: dict, track_num: int):
         console.print(f"[red]Could not open Opus file to tag: {e}[/red]")
         return
 
-    # --- 1. PREPARE YOUTUBE METADATA FOR COVER SEARCH ---
-    # We grab these now so MusicBrainz tags don't interfere
-    yt_title = info.get("title", "")
-    yt_uploader = info.get("uploader", "")
-    # Clean the uploader name (e.g., removing " - Topic")
-    yt_artist = yt_uploader.replace(" - Topic", "").strip()
+    yt_title = info.get("title", "Unknown Title")
+    raw_artist = info.get("artist") or info.get("uploader") or "Unknown Artist"
 
-    # --- 2. FETCH & APPLY MUSICBRAINZ TAGS (For File Organization) ---
+    yt_artist = re.split(r",|&| feat\.?| featuring ", raw_artist, flags=re.IGNORECASE)[0].strip()
+    yt_artist = yt_artist.replace(" - Topic", "").strip()
+
+    yt_album = info.get("album") or "Unknown Album"
+
     fp_info = get_metadata_via_picard_method(opus_path)
     for key, val in fp_info.items():
         audio[key] = [str(val)]
 
-    # Fallback for file tags if MusicBrainz found nothing
     if 'title' not in audio:
-        audio['title'] = [yt_title or "Unknown Title"]
+        audio['title'] = [yt_title]
     if 'artist' not in audio:
-        audio['artist'] = [yt_artist or "Unknown Artist"]
+        audio['artist'] = [yt_artist]
     if 'album' not in audio:
-        audio['album'] = [info.get("album") or "Unknown Album"]
+        audio['album'] = [yt_album]
 
     audio['tracknumber'] = [str(track_num)]
 
-    # --- 3. FETCH COVER ART (STRICTLY USING YOUTUBE METADATA) ---
     thumb_url = None
     try:
-        # We pass only the YouTube title and uploader to the search
-        thumb_url = get_apple_cover("", normalize_string(yt_artist), normalize_string(yt_title))
+        thumb_url = get_apple_cover(
+            normalize_string(yt_album),
+            normalize_string(yt_artist),
+            normalize_string(yt_title)
+        )
     except Exception:
         thumb_url = None
 
-    # --- 4. EMBED ARTWORK ---
     if thumb_url:
         try:
             response = retry_request(lambda: requests.get(thumb_url, timeout=10), max_retries=3)
@@ -363,14 +363,13 @@ def insert_metadata(opus_path: str, info: dict, track_num: int):
         except Exception as e:
             console.print(f"[yellow]Could not embed Apple Cover art: {e}[/yellow]")
 
-    # --- 5. LYRICS ---
     try:
-        # Use the finalized tags for lyrics search as they are usually more accurate
-        artist_for_lyr = audio.get("artist", [""])[0]
-        title_for_lyr = audio.get("title", [""])[0]
-        album_for_lyr = audio.get("album", [""])[0]
-
-        slyrics, _ = fetch_lyrics(artist_for_lyr, title_for_lyr, album_for_lyr, get_duration_seconds(opus_path))
+        slyrics, _ = fetch_lyrics(
+            yt_artist,
+            yt_title,
+            yt_album,
+            get_duration_seconds(opus_path)
+        )
         if slyrics:
             save_lrc(slyrics, opus_path)
             audio['lyrics'] = [slyrics]
@@ -499,9 +498,9 @@ def worker_loop(worker_id: int, job_queue: Queue, progress: Progress, worker_tas
                         if info is None:
                             raise RuntimeError("yt_dlp returned None.")
                         return info, ydl
-                
+
                 info, ydl_instance = retry_request(_dl, max_retries=2)
-                
+
                 final_path = ydl_instance.prepare_filename(info)
                 full_path = os.path.splitext(final_path)[0] + ".opus"
 
@@ -512,7 +511,7 @@ def worker_loop(worker_id: int, job_queue: Queue, progress: Progress, worker_tas
                     progress.update(worker_task_id, description=f"{short_desc} • tagging (MusicBrainz)")
                 except Exception:
                     pass
-                
+
                 try:
                     insert_metadata(full_path, info, song.index)
                 except Exception:
